@@ -1,0 +1,101 @@
+name: Sync Upstream Releases
+
+on:
+  schedule:
+    - cron: '0 2 * * *'  # Daily at 2 AM UTC
+  workflow_dispatch:
+    inputs:
+      force_sync:
+        description: 'Force sync even if version matches'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: rancher/system-agent
+
+jobs:
+  check-upstream:
+    runs-on: ubuntu-latest
+    outputs:
+      new_release: ${{ steps.check.outputs.new_release }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check upstream for new release
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Get latest upstream release
+          LATEST=$(gh api repos/${{ env.UPSTREAM_REPO }}/releases/latest --jq '.tag_name' 2>/dev/null || echo "")
+
+          if [ -z "$LATEST" ]; then
+            echo "::error::Failed to fetch upstream release"
+            exit 1
+          fi
+
+          echo "Latest upstream: $LATEST"
+
+          # Get current synced version
+          CURRENT=$(cat .upstream-version 2>/dev/null | tr -d '[:space:]' || echo "")
+          echo "Current synced: $CURRENT"
+
+          # Check if new release
+          if [ "$LATEST" != "$CURRENT" ] || [ "${{ inputs.force_sync }}" == "true" ]; then
+            echo "New release detected: $LATEST"
+            echo "new_release=true" >> $GITHUB_OUTPUT
+            echo "version=$LATEST" >> $GITHUB_OUTPUT
+
+            # Update version file
+            echo "$LATEST" > .upstream-version
+
+            # Configure git
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+
+            # Commit version file
+            git add .upstream-version
+            git commit -m "chore: sync upstream to $LATEST" || echo "No changes to commit"
+            git push || { echo "::error::Git push failed"; exit 1; }
+
+            # Create tag if not exists
+            if ! git rev-parse "$LATEST" >/dev/null 2>&1; then
+              git tag -a "$LATEST" -m "Sync from upstream $LATEST"
+              git push origin "$LATEST"
+              echo "Created tag: $LATEST"
+            else
+              echo "Tag $LATEST already exists"
+            fi
+          else
+            echo "No new release"
+            echo "new_release=false" >> $GITHUB_OUTPUT
+            echo "version=$CURRENT" >> $GITHUB_OUTPUT
+          fi
+
+  trigger-release:
+    needs: check-upstream
+    if: needs.check-upstream.outputs.new_release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger s390x release workflow
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Triggering release for version: ${{ needs.check-upstream.outputs.version }}"
+          gh workflow run release-s390x.yaml \
+            --repo ${{ github.repository }} \
+            -f version=${{ needs.check-upstream.outputs.version }}
