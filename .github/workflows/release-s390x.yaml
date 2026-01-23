@@ -16,7 +16,7 @@ permissions:
   packages: write
 
 concurrency:
-  group: release-s390x-${{ github.ref }}
+  group: release-s390x-${{ github.event.inputs.version || github.ref }}
   cancel-in-progress: false
 
 env:
