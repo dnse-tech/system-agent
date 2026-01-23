@@ -93,6 +93,7 @@ jobs:
       - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GIT_CONFIG_NOSYSTEM: "1"
         run: |
           VERSION="${{ needs.build-binary.outputs.version }}"
 
