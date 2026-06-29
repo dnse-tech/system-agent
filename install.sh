@@ -47,6 +47,15 @@ fi
 #   - CATTLE_AGENT_FALLBACK_PATH (default: )
 
 FALLBACK=v0.3.13
+# DNSE: pinned system-agent release that carries the linux/s390x binary asset.
+# Stamped to the real tag at release time by release-s390x.yaml; left as the placeholder
+# token for a standalone (un-stamped) run, in which case it falls back to FALLBACK below.
+DNSE_S390X_AGENT_VERSION="__DNSE_S390X_AGENT_VERSION__"
+DNSE_S390X_RELEASE_BASE="https://github.com/dnse-tech/system-agent/releases/download"
+# Initialize internal DNSE control flags so an inherited environment cannot flip the s390x
+# path: the override block and checksum step must only act on values this script itself set.
+DNSE_BINARY_URL_FROM_BASE=false
+DNSE_S390X_CHECKSUM_URL=""
 CACERTS_PATH=cacerts
 RETRYCOUNT=4500
 APPLYINATOR_ACTIVE_WAIT_COUNT=60 # If the system-agent is unhealthy but had created an interlock file to indicate it was actively applying a plan, after 5 minutes, ignore the interlock.
@@ -333,6 +342,9 @@ setup_env() {
 
         if [ -z "${CATTLE_AGENT_BINARY_URL}" ] && [ -n "${CATTLE_AGENT_BINARY_BASE_URL}" ]; then
             CATTLE_AGENT_BINARY_URL="${CATTLE_AGENT_BINARY_BASE_URL}/rancher-system-agent-${ARCH}"
+            # DNSE: record that we synthesized the URL from the server base URL, so the
+            # s390x override below only fires when the operator did not supply their own URL.
+            DNSE_BINARY_URL_FROM_BASE=true
         fi
 
         if [ -z "${CATTLE_AGENT_BINARY_URL}" ]; then
@@ -349,6 +361,22 @@ setup_env() {
             CATTLE_AGENT_BINARY_URL="https://github.com/rancher/system-agent/releases/download/${VERSION}/rancher-system-agent-${ARCH}"
             BINARY_SOURCE=upstream
         fi
+    fi
+
+    # DNSE: the s390x agent binary is not shipped in the Rancher server /assets (upstream
+    # rancher/system-agent has no s390x leg), so an s390x node 404s on the server base URL.
+    # Source it from the DNSE fork release instead, with sha256 verification, so s390x nodes
+    # onboard with arch parity. amd64/arm64 keep using the server assets untouched. Only fires
+    # when we synthesized the URL from the server base URL (operator overrides are respected).
+    if [ "${BINARY_SOURCE}" = "remote" ] && [ "${ARCH}" = "s390x" ] && [ "${DNSE_BINARY_URL_FROM_BASE}" = "true" ]; then
+        if [ "${DNSE_S390X_AGENT_VERSION}" = "__DNSE_S390X_AGENT_VERSION__" ]; then
+            DNSE_S390X_AGENT_VERSION="${FALLBACK}"   # standalone-run safety net (un-stamped script)
+        fi
+        CATTLE_AGENT_BINARY_URL="${DNSE_S390X_RELEASE_BASE}/${DNSE_S390X_AGENT_VERSION}/rancher-system-agent-s390x"
+        DNSE_S390X_CHECKSUM_URL="${DNSE_S390X_RELEASE_BASE}/${DNSE_S390X_AGENT_VERSION}/sha256sum-s390x.txt"
+        # github.com download must use the default CA bundle, not the Rancher server CA flag.
+        BINARY_SOURCE=upstream
+        info "DNSE: sourcing s390x agent binary from ${CATTLE_AGENT_BINARY_URL}"
     fi
 
     if [ "${CATTLE_AGENT_UNINSTALL_LOCAL}" = "true" ]; then
@@ -589,6 +617,17 @@ download_rancher_files() {
   mkdir -p ${CATTLE_AGENT_BIN_PREFIX}/bin
 
   download_rancher_file "rancher-system-agent" "binary" "${CATTLE_AGENT_BINARY_URL}" "${CATTLE_AGENT_BINARY_LOCAL}" "${CATTLE_AGENT_BINARY_LOCAL_LOCATION}" "${BINARY_SOURCE}"
+  # DNSE: verify the s390x agent binary against the fork release checksum. Fail closed: abort the
+  # install if the checksum file is unfetchable/empty or does not match the downloaded binary.
+  if [ -n "${DNSE_S390X_CHECKSUM_URL}" ]; then
+      info "DNSE: verifying s390x agent binary checksum"
+      expected=$(curl --connect-timeout 60 --max-time 60 ${CURL_LOG} -fsSL "${DNSE_S390X_CHECKSUM_URL}" | awk '{print $1}')
+      actual=$(sha256sum "${CATTLE_AGENT_BIN_PREFIX}/bin/rancher-system-agent" | awk '{print $1}')
+      if [ -z "${expected}" ] || [ "${expected}" != "${actual}" ]; then
+          fatal "DNSE: s390x agent binary checksum mismatch (expected '${expected}', got '${actual}')"
+      fi
+      info "DNSE: s390x agent binary checksum verified"
+  fi
   download_rancher_file "rancher-system-agent-uninstall.sh" "script" "${CATTLE_AGENT_UNINSTALL_URL}" "${CATTLE_AGENT_UNINSTALL_LOCAL}" "${CATTLE_AGENT_UNINSTALL_LOCAL_LOCATION}" "${UNINSTALL_SOURCE}"
 }
 
