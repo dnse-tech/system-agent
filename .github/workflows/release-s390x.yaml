@@ -71,9 +71,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          # Pin to the tag ref so the install.sh we stamp matches the binary built from the same tag.
-          ref: ${{ needs.build-binary.outputs.version }}
 
       - name: Configure Git
         run: |
@@ -86,17 +83,12 @@ jobs:
           name: binary-s390x
           path: dist
 
-      - name: Stage release assets
+      - name: Rename and generate checksums
+        working-directory: dist
         run: |
-          VERSION="${{ needs.build-binary.outputs.version }}"
-          mkdir -p dist
-          mv dist/rancher-system-agent dist/rancher-system-agent-s390x 2>/dev/null || true
-          # DNSE: stamp the pinned version into the install.sh placeholder so the served script
-          # points at THIS release's s390x binary + checksum (see install.sh DNSE_S390X_AGENT_VERSION).
-          sed "s|__DNSE_S390X_AGENT_VERSION__|${VERSION}|g" install.sh > dist/install.sh
-          cp system-agent-uninstall.sh dist/system-agent-uninstall.sh
-          ( cd dist && sha256sum rancher-system-agent-s390x > sha256sum-s390x.txt && cat sha256sum-s390x.txt )
-          grep -n 'DNSE_S390X_AGENT_VERSION=' dist/install.sh
+          mv rancher-system-agent rancher-system-agent-s390x
+          sha256sum rancher-system-agent-s390x > sha256sum-s390x.txt
+          cat sha256sum-s390x.txt
 
       - name: Create or update GitHub Release
         env:
